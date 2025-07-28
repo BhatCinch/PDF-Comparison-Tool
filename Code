@@ -1,0 +1,178 @@
+import streamlit as st
+import fitz  # PyMuPDF
+import pytesseract
+from PIL import Image, ImageDraw
+import io
+import difflib
+import base64
+from collections import defaultdict
+
+#setting the tesseract to path
+pytesseract.pytesseract.tesseract_cmd = r'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'
+
+#to fit the content to full page
+st.set_page_config(layout="wide")
+
+st.title("PDF Comparison")
+
+#uploading the files
+pdf1 = st.file_uploader("Upload PDF 1", type="pdf")
+pdf2 = st.file_uploader("Upload PDF 2", type="pdf")
+
+#function to extract text from the pdf by converting it to image with the pdf files as the argument
+def extract_images_and_ocr(pdf_file):
+    images = []                 #to store images for highlighting
+    ocr_results = []            #to store OCR data for comparison
+
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")     #opening the pdf as image
+
+    for page_num in range(len(doc)):
+        pix = doc.load_page(page_num).get_pixmap(dpi=150)       #dpi=150 is for the resolution of the image, higher the dpi better the quality lower the speed of processing
+        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGBA")        #pixmap image converted to RGBA mode to help in highlighting
+        ocr = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)       #tesseract analyses the image and gives the detailed data
+        ocr["page_num"] = [page_num] * len(ocr["text"])         #adding page numbers, the text is assigned with the page number
+        images.append(img)
+        ocr_results.append(ocr)
+    doc.close()
+    return images, ocr_results
+
+# the function formats the OCR output for better comaparison results
+def flatten_ocr_data(ocr_results):
+    flat = []                          #to store the flattened word data
+    for page_idx, ocr in enumerate(ocr_results):
+        for i, word in enumerate(ocr["text"]):
+            if word.strip():            #checks if the cleaned word is not empty and appends it to the new list flat along with its index and the page number to which it belongs
+                flat.append((word.strip(), i, page_idx))  
+    return flat
+
+#function to highlight the detected words by either index
+def highlight_words_by_index(image, ocr_data, indices, color):
+    overlay = Image.new("RGBA", image.size, (255, 255, 255, 0))     #creates a transparent image same size as the original page
+    draw = ImageDraw.Draw(overlay)
+    fill_color = (0, 255, 0, 60) if color == "green" else (255, 0, 0, 60)
+
+    for i in indices:
+        if i >= len(ocr_data["left"]):          #to ensure that the index i is valid 
+            continue
+        x, y, w, h = ocr_data["left"][i], ocr_data["top"][i], ocr_data["width"][i], ocr_data["height"][i]       #this extract the dimensions of the bounding box of the word in the index i
+        draw.rectangle([x, y, x + w, y + h], fill=fill_color)
+
+    combined = Image.alpha_composite(image.convert("RGBA"), overlay)        #converting the overlay and the pdf image to one image
+    return combined
+
+#main block
+if pdf1 and pdf2:                   
+    with st.spinner("Processing the documents..."):
+        images1, ocr_data1 = extract_images_and_ocr(pdf1)
+        pdf1.seek(0)
+        images2, ocr_data2 = extract_images_and_ocr(pdf2)
+
+        flat1 = flatten_ocr_data(ocr_data1)
+        flat2 = flatten_ocr_data(ocr_data2)
+
+        #extracting the words from the flattened tuples        
+        words1 = [w for w, _, _ in flat1]
+        words2 = [w for w, _, _ in flat2]
+
+        #sequence matcher
+        matcher = difflib.SequenceMatcher(None, words1, words2)     #using built-in comparison tool for word by word comparison
+        removed_by_page = defaultdict(set)      #dictionary to store the indices of words in PDF 1
+        added_by_page = defaultdict(set)        #dictionary to store the indices of words in PDF 2
+
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag in ('replace', 'delete'):            #checking if the word is deleted or replaced in PDF 1 and stored in removed_by_page dictionary to be highlighted in red
+                for _, idx, pg in flat1[i1:i2]:
+                    removed_by_page[pg].add(idx)
+            if tag in ('replace', 'insert'):            #checking if the word is added or replaced in PDF 2 and stored in added_by_page dictionary to be highlighted in green
+                for _, idx, pg in flat2[j1:j2]:
+                    added_by_page[pg].add(idx)
+
+        left_images_html = ""
+        right_images_html = ""
+        num_pages = max(len(images1), len(images2))     #if the pdfs have different number of pages, the max no. of pages is taken to ensure all the pages of the pdfs are covered
+
+        for page_num in range(num_pages):
+            if page_num < len(images1):         #if pdf1 has that page then send that page for highlights
+                img1_high = highlight_words_by_index(images1[page_num].copy(), ocr_data1[page_num], removed_by_page[page_num], "red")
+                #the highlighted image is comverted to HTML image 
+                buf1 = io.BytesIO()
+                img1_high.save(buf1, format="PNG")
+                img1_data = buf1.getvalue()
+                img1_base64 = base64.b64encode(img1_data).decode("utf-8")
+                left_images_html += f"<img src='data:image/png;base64,{img1_base64}' style='width:100%; margin-bottom:10px;'/>"
+
+            if page_num < len(images2):
+                img2_high = highlight_words_by_index(images2[page_num].copy(), ocr_data2[page_num], added_by_page[page_num], "green")
+                buf2 = io.BytesIO()
+                img2_high.save(buf2, format="PNG")
+                img2_data = buf2.getvalue()
+                img2_base64 = base64.b64encode(img2_data).decode("utf-8")
+                right_images_html += f"<img src='data:image/png;base64,{img2_base64}' style='width:100%; margin-bottom:10px;'/>"
+
+        # JavaScript for scroll sync and go-to-top button
+        sync_script = """
+        <script>
+        function syncScroll(el1, el2) {
+            el1.onscroll = function() {
+                if (document.getElementById('syncToggle').checked) {
+                    el2.scrollTop = this.scrollTop;
+                }
+            };
+            el2.onscroll = function() {
+                if (document.getElementById('syncToggle').checked) {
+                    el1.scrollTop = this.scrollTop;
+                }
+            };
+        }
+        window.onload = function() {
+            const left = document.getElementById('leftPane');
+            const right = document.getElementById('rightPane');
+            syncScroll(left, right);
+        };
+        function scrollToTop() {
+            document.getElementById('leftPane').scrollTop = 0;
+            document.getElementById('rightPane').scrollTop = 0;
+        }
+        </script>
+        """
+        #html block to display the highlighted images
+        html_output = f"""
+        <div style='margin-bottom: 10px;'>
+            <label>
+                <input type='checkbox' id='syncToggle' checked /> Enable Scroll Sync    
+            </label>
+        </div>
+
+        <div style='display: flex; gap: 20px;'>
+            <div id='leftPane' style='height: 600px; overflow-y: scroll; width: 48%; border: 1px solid gray; padding: 10px;'>
+                PDF 1
+                {left_images_html}
+            </div>
+            <div id='rightPane' style='height: 600px; overflow-y: scroll; width: 48%; border: 1px solid gray; padding: 10px;'>
+                PDF 2
+                {right_images_html}
+            </div>
+        </div>
+
+        <!-- Go to Top Button -->
+        <button onclick="scrollToTop()" style="
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background-color: white;
+            color: white;
+            border: 1px;
+            padding: 10px 20px;
+            font-size: 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            z-index: 1000;
+        ">🔝</button>
+
+        {sync_script}
+        """
+
+        st.components.v1.html(html_output, height=700)  #loading everythign to streamlit
+
+else:
+    st.info("Upload two PDFs to begin.")
