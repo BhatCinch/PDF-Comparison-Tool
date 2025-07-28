@@ -1,0 +1,18 @@
+# PDF Comparison Tool 
+
+A simple and powerful PDF comparison tool built with Python and Streamlit. It uses OCR to extract text from two PDFs and highlights word-level differences in a side-by-side view.
+
+## Features
+- Side-by-side PDF text comparison
+- Word-level diff with highlights:
+  - Green: added words
+  - Red: removed words
+- OCR support for scanned documents using `pytesseract`
+- Scroll sync toggle for better navigation
+
+## How to Run
+
+1. Clone the repo:
+   ```bash
+   git clone https://github.com/your-username/pdf-comparator.git
+   cd pdf-comparator
